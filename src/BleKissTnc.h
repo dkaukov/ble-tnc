@@ -149,7 +149,10 @@ public:
     }
   }
 
-  void loop() { (void)drainOutgoing(_config.maxNotifyChunksPerLoop); }
+  void loop() {
+    processIncomingStream();
+    (void)drainOutgoing(_config.maxNotifyChunksPerLoop);
+  }
 
   bool startAdvertising() {
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
@@ -338,8 +341,10 @@ private:
   size_t _incomingHead = 0;
   size_t _incomingTail = 0;
   size_t _incomingCount = 0;
+  portMUX_TYPE _incomingMux = portMUX_INITIALIZER_UNLOCKED;
 
   blekiss::KissStreamDecoder<DECODED_FRAME_SIZE> _streamDecoder;
+  volatile bool _decoderResetPending = false;
 
   QueueSlot _queue[OUTGOING_QUEUE_DEPTH];
   size_t _queueHead = 0;
@@ -355,6 +360,7 @@ private:
     _connected = false;
     _notifySubscribed = false;
     _mtu = 23;
+    _decoderResetPending = false;
 
     clearIncomingStream();
     clearDecodeState();
@@ -362,9 +368,11 @@ private:
   }
 
   void clearIncomingStream() {
+    portENTER_CRITICAL(&_incomingMux);
     _incomingHead = 0;
     _incomingTail = 0;
     _incomingCount = 0;
+    portEXIT_CRITICAL(&_incomingMux);
   }
 
   void clearDecodeState() {
@@ -388,7 +396,9 @@ private:
     _mtu = 23;
 
     clearIncomingStream();
-    clearDecodeState();
+    portENTER_CRITICAL(&_incomingMux);
+    _decoderResetPending = true;
+    portEXIT_CRITICAL(&_incomingMux);
     clearQueue();
 
     if (_disconnectCallback != nullptr) {
@@ -404,9 +414,9 @@ private:
     _mtu = (mtu < 23) ? 23 : mtu;
   }
 
-  void handleBleWrite(const uint8_t *data, size_t len) { consumeIncomingBytes(data, len); }
+  void handleBleWrite(const uint8_t *data, size_t len) { enqueueIncomingBytes(data, len); }
 
-  bool pushIncomingByte(uint8_t b) {
+  bool pushIncomingByteLocked(uint8_t b) {
     if (_incomingCount >= INCOMING_STREAM_SIZE) {
       return false;
     }
@@ -418,36 +428,48 @@ private:
   }
 
   bool popIncomingByte(uint8_t &b) {
+    portENTER_CRITICAL(&_incomingMux);
     if (_incomingCount == 0) {
+      portEXIT_CRITICAL(&_incomingMux);
       return false;
     }
 
     b = _incomingBuf[_incomingHead];
     _incomingHead = (_incomingHead + 1) % INCOMING_STREAM_SIZE;
     --_incomingCount;
+    portEXIT_CRITICAL(&_incomingMux);
     return true;
   }
 
-  void consumeIncomingBytes(const uint8_t *data, size_t len) {
+  void enqueueIncomingBytes(const uint8_t *data, size_t len) {
     if (data == nullptr || len == 0) {
       return;
     }
 
+    portENTER_CRITICAL(&_incomingMux);
     for (size_t i = 0; i < len; ++i) {
-      if (!pushIncomingByte(data[i])) {
-        processIncomingStream();
-        if (!pushIncomingByte(data[i])) {
-          ++_stats.rxIncomingOverflowDrops;
-          continue;
-        }
+      if (!pushIncomingByteLocked(data[i])) {
+        ++_stats.rxIncomingOverflowDrops;
+        continue;
       }
       ++_stats.rxBytes;
     }
-
-    processIncomingStream();
+    portEXIT_CRITICAL(&_incomingMux);
   }
 
   void processIncomingStream() {
+    bool resetDecoder = false;
+    portENTER_CRITICAL(&_incomingMux);
+    if (_decoderResetPending) {
+      _decoderResetPending = false;
+      resetDecoder = true;
+    }
+    portEXIT_CRITICAL(&_incomingMux);
+
+    if (resetDecoder) {
+      clearDecodeState();
+    }
+
     uint8_t b = 0;
     while (popIncomingByte(b)) {
       const blekiss::KissConsumeResult r = _streamDecoder.consumeByte(b);

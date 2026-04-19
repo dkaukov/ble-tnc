@@ -37,6 +37,8 @@ UUIDs implemented by default:
 - NimBLE-Arduino internals may still allocate memory internally.
 - Single active `BleKissTnc` instance per process.
 - `sendDataFrame()` and `sendKissPayload()` enqueue encoded frames; sending happens via `loop()` / `drainOutgoing()`.
+- Decoded RX frame callbacks (`setFrameCallback`) are dispatched from `loop()` context (not NimBLE callback/task context).
+- If `loop()` is starved, RX callback dispatch can be delayed and incoming bytes may be dropped when the fixed input ring buffer fills.
 - If `Config.requireNotifySubscription` is true (default), outbound data is only sent after client enables notifications.
 - On disconnect, incoming parser state and outgoing queue are cleared.
 
