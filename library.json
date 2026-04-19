@@ -1,0 +1,35 @@
+{
+  "name": "BleKissTncNimble",
+  "version": "0.1.0",
+  "description": "Header-only BLE-KISS (KISS TNC over BLE) library for ESP32 using NimBLE-Arduino.",
+  "keywords": [
+    "ble",
+    "kiss",
+    "tnc",
+    "aprs",
+    "esp32",
+    "nimble"
+  ],
+  "homepage": "https://github.com/hessu/aprs-specs/blob/master/BLE-KISS-API.md",
+  "authors": [
+    {
+      "name": "BleKissTnc Contributors"
+    }
+  ],
+  "license": "MIT",
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "headers": [
+    "BleKissTnc.h"
+  ],
+  "dependencies": [
+    {
+      "name": "h2zero/NimBLE-Arduino",
+      "version": ">=1.4.0"
+    }
+  ]
+}
