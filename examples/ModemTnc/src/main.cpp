@@ -11,6 +11,7 @@ RF/audio path uses esp32-afsk + arduino-audio-tools + DRA818.
 #include <DRA818.h>
 #include <driver/adc.h>
 #include <driver/dac.h>
+#include <string.h>
 
 #include "AfskDemodulator.h"
 #include "AfskModulator.h"
@@ -100,6 +101,15 @@ static BleKiss::Config makeBleConfig() {
 }
 
 static BleKiss bleKiss(makeBleConfig());
+
+// BLE callbacks run in NimBLE task context. Do not touch modem/audio from there.
+// Queue one pending RF-TX payload and process it from loop() on Arduino task.
+static portMUX_TYPE ble_rx_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool ble_rx_pending = false;
+static uint8_t ble_rx_payload[KISS_MAX_FRAME];
+static size_t ble_rx_payload_len = 0;
+static uint32_t ble_rx_drop_busy = 0;
+static uint32_t ble_rx_drop_oversize = 0;
 #endif
 
 #if TNC_TRANSPORT_SERIAL
@@ -228,10 +238,23 @@ static void on_ble_kiss_frame(const uint8_t *data, size_t len, void *ctx) {
     return;
   }
 
-  begin_tx();
-  mod.modulate(data + 1, len - 1, tx_mod_buffer, TX_BUFFER_SAMPLES,
-               TX_LEAD_SILENCE_MS, TX_TAIL_SILENCE_MS);
-  end_tx();
+  const size_t payload_len = len - 1;
+  if (payload_len > KISS_MAX_FRAME) {
+    ++ble_rx_drop_oversize;
+    return;
+  }
+
+  portENTER_CRITICAL(&ble_rx_mux);
+  if (ble_rx_pending) {
+    ++ble_rx_drop_busy;
+    portEXIT_CRITICAL(&ble_rx_mux);
+    return;
+  }
+
+  memcpy(ble_rx_payload, data + 1, payload_len);
+  ble_rx_payload_len = payload_len;
+  ble_rx_pending = true;
+  portEXIT_CRITICAL(&ble_rx_mux);
 }
 
 static void on_ble_connect(void *ctx) {
@@ -242,6 +265,33 @@ static void on_ble_connect(void *ctx) {
 static void on_ble_disconnect(void *ctx) {
   (void)ctx;
   Serial.println("BLE client disconnected");
+}
+
+static void process_ble_rx_pending() {
+  uint8_t payload[KISS_MAX_FRAME];
+  size_t payload_len = 0;
+  bool have_payload = false;
+
+  portENTER_CRITICAL(&ble_rx_mux);
+  if (ble_rx_pending) {
+    payload_len = ble_rx_payload_len;
+    if (payload_len > KISS_MAX_FRAME) {
+      payload_len = KISS_MAX_FRAME;
+    }
+    memcpy(payload, ble_rx_payload, payload_len);
+    ble_rx_pending = false;
+    have_payload = true;
+  }
+  portEXIT_CRITICAL(&ble_rx_mux);
+
+  if (!have_payload || payload_len == 0) {
+    return;
+  }
+
+  begin_tx();
+  mod.modulate(payload, payload_len, tx_mod_buffer, TX_BUFFER_SAMPLES,
+               TX_LEAD_SILENCE_MS, TX_TAIL_SILENCE_MS);
+  end_tx();
 }
 #endif
 
@@ -429,6 +479,7 @@ void setup() {
 void loop() {
 #if TNC_TRANSPORT_BLE
   bleKiss.loop();
+  process_ble_rx_pending();
 #endif
 
 #if TNC_TRANSPORT_SERIAL
